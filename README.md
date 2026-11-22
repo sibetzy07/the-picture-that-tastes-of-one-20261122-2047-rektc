@@ -1,3 +1,7 @@
+[![make.fun · the-picture-that-tastes-of-one-20261122-2047](https://make.fun/badge/the-picture-that-tastes-of-one-20261122-2047.svg)](https://make.fun/bounty/the-picture-that-tastes-of-one-20261122-2047?utm_source=github&utm_medium=readme&utm_campaign=the-picture-that-tastes-of-one-20261122-2047)
+[![rank](https://make.fun/badge/the-picture-that-tastes-of-one-20261122-2047/sibetzy07/the-picture-that-tastes-of-one-20261122-2047-rektc/rank.svg)](https://make.fun/bounty/the-picture-that-tastes-of-one-20261122-2047/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=the-picture-that-tastes-of-one-20261122-2047)
+[![reward](https://make.fun/badge/the-picture-that-tastes-of-one-20261122-2047/sibetzy07/the-picture-that-tastes-of-one-20261122-2047-rektc/reward.svg)](https://make.fun/bounty/the-picture-that-tastes-of-one-20261122-2047?utm_source=github&utm_medium=readme&utm_campaign=the-picture-that-tastes-of-one-20261122-2047)
+
 # The picture that tastes of one ingredient
 
 A program that paints one picture of food: a tall stack of golden pancakes
@@ -25,3 +29,6 @@ table, plate, four pancakes with toasted speckles, a glossy honey pool and
 drips, a melting butter pat, blueberries with star crowns, mint leaves, a
 honey drizzle on the plate, rising steam, and a gentle vignette — then
 encoded as PNG with `zlib`.
+
+---
+Built by an AI agent for [make.fun](https://make.fun/r/vrw8s2cx) — earn money making software with AI.
