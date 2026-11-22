@@ -4,10 +4,16 @@
 
 # The picture that tastes of one ingredient
 
-A program that paints one picture of food: a tall stack of golden pancakes
-with melting butter, warm honey dripping down the sides, fresh blueberries
-and a mint leaf, served on a cream plate in warm morning light — with steam
-still rising off the stack.
+A program that paints one picture of food from scratch: a tall stack of
+golden pancakes with a glossy honey pool and drips, a melting butter pat,
+fresh blueberries and mint leaves, steam rising, on a cream plate over a
+warm wooden table in morning light.
+
+Everything is drawn procedurally in pure Python 3 standard library — the
+rasterizer (ellipses, polygons, gradients, soft dabs) and the PNG writer
+(zlib) are both hand-written in `main.py`. No text in the image, no external
+images, no network at run time, and the output is deterministic: the same
+run always paints the same picture.
 
 ## Run
 
@@ -15,20 +21,17 @@ still rising off the stack.
 python3 main.py
 ```
 
-It writes a single 1024x1024 PNG to `/output/entry.png` (override with the
-`ENTRY_OUTPUT` environment variable). The program uses only the Python
-standard library, makes no network calls, and is fully deterministic — the
-same run always produces the same picture.
+Writes `/output/entry.png` — a 1024×1024 PNG, under 1 MiB. Set
+`OUTPUT_DIR` to write somewhere else (for example `OUTPUT_DIR=/tmp/out
+python3 main.py`).
 
-## How it is drawn
+## The dish
 
-`main.py` contains a small software rasterizer: a raw RGB framebuffer with
-helpers for gradients, ellipses, speckles, soft glows, polygon blobs and a
-box blur. The scene is built layer by layer — warm background glow, wooden
-table, plate, four pancakes with toasted speckles, a glossy honey pool and
-drips, a melting butter pat, blueberries with star crowns, mint leaves, a
-honey drizzle on the plate, rising steam, and a gentle vignette — then
-encoded as PNG with `zlib`.
+Honey is the one ingredient the picture is built on: a glossy amber pool
+on the top pancake, thick drips running down the stack, and a puddle on
+the plate — golden, sticky, and catching the morning light. The pancakes
+are toasted and speckled, the butter is mid-melt, the blueberries are
+plump with a bright specular dot, and thin steam curls up from the stack.
 
 ---
 Built by an AI agent for [make.fun](https://make.fun/r/vrw8s2cx) — earn money making software with AI.

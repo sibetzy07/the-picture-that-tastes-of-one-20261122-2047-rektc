@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """The picture that tastes of one ingredient.
 
-A program that paints, from scratch, one picture of food: a tall stack of
-golden pancakes with melting butter, warm honey dripping down the sides,
-fresh blueberries and a mint leaf, on a cream plate in warm morning light.
+A program that paints one picture of food from scratch: a tall stack of
+golden pancakes with a glossy honey pool and drips, a melting butter pat,
+fresh blueberries and mint, steam rising, on a cream plate over a warm
+wooden table in morning light. No text, no external images, no network.
 
-Everything is drawn procedurally with the Python standard library only:
-a small software rasterizer (ellipses, gradients, speckles, soft steam)
-writes RGB pixels into a framebuffer, which is encoded as a PNG with
-zlib. No network, no external files, no copied assets, fully deterministic.
+Pure standard library: the rasterizer and the PNG writer (zlib) are both
+hand-written here. Deterministic: the same run always paints the same
+picture. Writes /output/entry.png (or $OUTPUT_DIR/entry.png).
 """
 
 import math
@@ -19,418 +19,349 @@ import zlib
 
 W = 1024
 H = 1024
-OUT = os.environ.get("ENTRY_OUTPUT", "/output/entry.png")
+OUT_DIR = os.environ.get("OUTPUT_DIR", "/output")
 
 RNG = random.Random(20261123)
 
-# ---------------------------------------------------------------- framebuffer
-buf = bytearray(W * H * 3)
+# ---------------------------------------------------------------- canvas
 
+class Canvas:
+    def __init__(self, w, h):
+        self.w = w
+        self.h = h
+        self.rows = [bytearray(w * 3) for _ in range(h)]
 
-def clamp(v, lo=0, hi=255):
-    return lo if v < lo else hi if v > hi else v
+    def set_px(self, x, y, r, g, b):
+        if 0 <= x < self.w and 0 <= y < self.h:
+            i = x * 3
+            row = self.rows[y]
+            row[i] = r
+            row[i + 1] = g
+            row[i + 2] = b
 
+    def blend_px(self, x, y, r, g, b, a):
+        """Alpha-blend one pixel; a in 0..1."""
+        if 0 <= x < self.w and 0 <= y < self.h and a > 0.0:
+            i = x * 3
+            row = self.rows[y]
+            ia = 1.0 - a
+            row[i] = int(row[i] * ia + r * a)
+            row[i + 1] = int(row[i + 1] * ia + g * a)
+            row[i + 2] = int(row[i + 2] * ia + b * a)
 
-def px(x, y):
-    return (y * W + x) * 3
+    def fill_rect(self, x0, y0, x1, y1, color):
+        x0 = max(0, x0)
+        y0 = max(0, y0)
+        x1 = min(self.w, x1)
+        y1 = min(self.h, y1)
+        if x1 <= x0 or y1 <= y0:
+            return
+        px = bytes(color) * (x1 - x0)
+        for y in range(y0, y1):
+            self.rows[y][x0 * 3:x1 * 3] = px
 
+    def vgrad_rect(self, x0, y0, x1, y1, top, bottom):
+        """Vertical gradient rectangle."""
+        x0 = max(0, x0)
+        y0 = max(0, y0)
+        x1 = min(self.w, x1)
+        y1 = min(self.h, y1)
+        span = max(1, y1 - y0)
+        for y in range(y0, y1):
+            t = (y - y0) / span
+            c = tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3))
+            self.rows[y][x0 * 3:x1 * 3] = bytes(c) * (x1 - x0)
 
-def blend(x, y, r, g, b, a):
-    """Blend colour (r,g,b) over pixel (x,y) with alpha a in [0,1]."""
-    if x < 0 or x >= W or y < 0 or y >= H or a <= 0:
-        return
-    i = px(x, y)
-    ia = 1.0 - a
-    buf[i] = clamp(int(buf[i] * ia + r * a))
-    buf[i + 1] = clamp(int(buf[i + 1] * ia + g * a))
-    buf[i + 2] = clamp(int(buf[i + 2] * ia + b * a))
+    def fill_ellipse(self, cx, cy, rx, ry, color):
+        self.fill_ellipse_grad(cx, cy, rx, ry, color, color)
 
-
-def set_px(x, y, r, g, b):
-    if 0 <= x < W and 0 <= y < H:
-        i = px(x, y)
-        buf[i] = clamp(int(r))
-        buf[i + 1] = clamp(int(g))
-        buf[i + 2] = clamp(int(b))
-
-
-def lerp(a, b, t):
-    return a + (b - a) * t
-
-
-def lerp_col(c1, c2, t):
-    return (lerp(c1[0], c2[0], t), lerp(c1[1], c2[1], t), lerp(c1[2], c2[2], t))
-
-
-# ---------------------------------------------------------------- primitives
-def fill_rect(x0, y0, x1, y1, col, alpha=1.0):
-    for y in range(max(0, y0), min(H, y1)):
-        for x in range(max(0, x0), min(W, x1)):
-            blend(x, y, col[0], col[1], col[2], alpha)
-
-
-def ellipse(cx, cy, rx, ry, col_top, col_bottom=None, alpha=1.0,
-            edge_dark=None, squash=1.0):
-    """Filled ellipse; vertical gradient top->bottom, optional darker rim."""
-    if col_bottom is None:
-        col_bottom = col_top
-    y0 = max(0, int(cy - ry))
-    y1 = min(H, int(cy + ry) + 1)
-    for y in range(y0, y1):
-        dy = (y - cy) / ry
-        if abs(dy) > 1:
-            continue
-        half = rx * math.sqrt(max(0.0, 1.0 - dy * dy))
-        x0 = int(cx - half)
-        x1 = int(cx + half)
-        t = (y - (cy - ry)) / (2.0 * ry)
-        col = lerp_col(col_top, col_bottom, t)
-        # rim darkening near the horizontal edge
-        for x in range(max(0, x0), min(W, x1 + 1)):
-            nx = abs((x - cx) / max(1.0, half)) if half > 0 else 0.0
-            r, g, b = col
-            if edge_dark is not None and nx > 0.82:
-                f = (nx - 0.82) / 0.18
-                r, g, b = lerp_col((r, g, b), edge_dark, f * 0.85)
-            blend(x, y, r, g, b, alpha)
-
-
-def circle(cx, cy, r, col, alpha=1.0):
-    ellipse(cx, cy, r, r, col, col, alpha)
-
-
-def soft_disc(cx, cy, r, col, alpha):
-    """Radial falloff disc (soft glow / shadow)."""
-    y0 = max(0, int(cy - r))
-    y1 = min(H, int(cy + r) + 1)
-    for y in range(y0, y1):
-        for x in range(max(0, int(cx - r)), min(W, int(cx + r) + 1)):
-            d = math.hypot(x - cx, y - cy) / r
-            if d >= 1:
+    def fill_ellipse_grad(self, cx, cy, rx, ry, top, bottom):
+        """Filled ellipse with a vertical colour gradient."""
+        if rx <= 0 or ry <= 0:
+            return
+        y0 = max(0, int(cy - ry))
+        y1 = min(self.h - 1, int(cy + ry) + 1)
+        for y in range(y0, y1 + 1):
+            dy = (y - cy) / ry
+            if abs(dy) > 1.0:
                 continue
-            a = alpha * (1.0 - d * d)
-            blend(x, y, col[0], col[1], col[2], a)
+            dx = rx * math.sqrt(max(0.0, 1.0 - dy * dy))
+            x0 = max(0, int(cx - dx))
+            x1 = min(self.w - 1, int(cx + dx))
+            if x1 < x0:
+                continue
+            t = (y - (cy - ry)) / (2.0 * ry)
+            t = max(0.0, min(1.0, t))
+            c = tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3))
+            self.rows[y][x0 * 3:(x1 + 1) * 3] = bytes(c) * (x1 - x0 + 1)
+
+    def ellipse_ring(self, cx, cy, rx, ry, color, thick):
+        """Thin ring around an ellipse (drawn as two ellipses)."""
+        for k in range(thick):
+            self._ellipse_outline(cx, cy, rx - k, ry - k, color)
+
+    def _ellipse_outline(self, cx, cy, rx, ry, color):
+        if rx <= 0 or ry <= 0:
+            return
+        steps = int(2 * math.pi * max(rx, ry))
+        steps = max(64, min(3000, steps))
+        for i in range(steps):
+            a = 2 * math.pi * i / steps
+            x = int(cx + rx * math.cos(a))
+            y = int(cy + ry * math.sin(a))
+            self.set_px(x, y, *color)
+
+    def fill_poly(self, pts, color):
+        """Scanline polygon fill."""
+        if len(pts) < 3:
+            return
+        ys = [p[1] for p in pts]
+        y0 = max(0, int(min(ys)))
+        y1 = min(self.h - 1, int(max(ys)))
+        n = len(pts)
+        for y in range(y0, y1 + 1):
+            xs = []
+            for i in range(n):
+                x1, y1p = pts[i]
+                x2, y2p = pts[(i + 1) % n]
+                if (y1p <= y < y2p) or (y2p <= y < y1p):
+                    if y2p != y1p:
+                        x = x1 + (y - y1p) * (x2 - x1) / (y2p - y1p)
+                        xs.append(x)
+            if len(xs) < 2:
+                continue
+            xs.sort()
+            for j in range(0, len(xs) - 1, 2):
+                xa = max(0, int(xs[j]))
+                xb = min(self.w - 1, int(xs[j + 1]))
+                if xb >= xa:
+                    self.rows[y][xa * 3:(xb + 1) * 3] = bytes(color) * (xb - xa + 1)
+
+    def dab(self, cx, cy, r, color, alpha=1.0):
+        """Soft round dab with a falloff edge."""
+        if r <= 0:
+            return
+        r = int(r)
+        for y in range(cy - r, cy + r + 1):
+            dy = y - cy
+            for x in range(cx - r, cx + r + 1):
+                dx = x - cx
+                d = math.sqrt(dx * dx + dy * dy)
+                if d <= r:
+                    a = alpha * (1.0 - (d / r) ** 2)
+                    a = min(1.0, a * 1.6)
+                    self.blend_px(x, y, *color, a)
+
+    def line(self, x0, y0, x1, y1, color, width=1, alpha=1.0):
+        steps = int(max(abs(x1 - x0), abs(y1 - y0))) + 1
+        for i in range(steps + 1):
+            t = i / steps
+            x = int(x0 + (x1 - x0) * t)
+            y = int(y0 + (y1 - y0) * t)
+            for wy in range(-(width // 2), width // 2 + 1):
+                for wx in range(-(width // 2), width // 2 + 1):
+                    self.blend_px(x + wx, y + wy, *color, alpha)
 
 
-def speckle(cx, cy, rx, ry, n, cols, rmin=1, rmax=3, alpha=0.5):
-    """Deterministic toasted speckles inside an ellipse."""
-    for _ in range(n):
-        ang = RNG.uniform(0, 2 * math.pi)
-        rad = math.sqrt(RNG.random())
-        x = int(cx + math.cos(ang) * rad * rx)
-        y = int(cy + math.sin(ang) * rad * ry)
-        c = RNG.choice(cols)
-        circle(x, y, RNG.randint(rmin, rmax), c, alpha * RNG.uniform(0.5, 1.0))
+def lerp(c1, c2, t):
+    return tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3))
 
 
-def wobbly_blob(points, col, alpha=1.0):
-    """Fill a polygon (scanline fill) - used for syrup drips and leaves."""
-    ys = [p[1] for p in points]
-    y0, y1 = max(0, int(min(ys))), min(H, int(max(ys)) + 1)
-    n = len(points)
-    for y in range(y0, y1):
-        xs = []
-        for i in range(n):
-            x1, y1p = points[i]
-            x2, y2p = points[(i + 1) % n]
-            if (y1p <= y < y2p) or (y2p <= y < y1p):
-                t = (y - y1p) / (y2p - y1p)
-                xs.append(x1 + t * (x2 - x1))
-        xs.sort()
-        for k in range(0, len(xs) - 1, 2):
-            for x in range(max(0, int(xs[k])), min(W, int(xs[k + 1]) + 1)):
-                blend(x, y, col[0], col[1], col[2], alpha)
+# ---------------------------------------------------------------- picture
 
+def paint():
+    cv = Canvas(W, H)
 
-def box_blur_region(x0, y0, x1, y1, radius):
-    """Cheap separable box blur on a rectangular region (steam softening)."""
-    x0, y0 = max(0, x0), max(0, y0)
-    x1, y1 = min(W, x1), min(H, y1)
-    tmp = bytearray(buf)
-    w = x1 - x0
-    h = y1 - y0
-    # horizontal pass into tmp copy, vertical pass back into buf
-    horiz = bytearray(w * h * 3)
-    for y in range(y0, y1):
-        for x in range(x0, x1):
-            sr = sg = sb = cnt = 0
-            for dx in range(-radius, radius + 1):
-                xx = min(max(x + dx, x0), x1 - 1)
-                i = px(xx, y)
-                sr += tmp[i]
-                sg += tmp[i + 1]
-                sb += tmp[i + 2]
-                cnt += 1
-            j = ((y - y0) * w + (x - x0)) * 3
-            horiz[j] = sr // cnt
-            horiz[j + 1] = sg // cnt
-            horiz[j + 2] = sb // cnt
-    for y in range(y0, y1):
-        for x in range(x0, x1):
-            sr = sg = sb = cnt = 0
-            for dy in range(-radius, radius + 1):
-                yy = min(max(y + dy, y0), y1 - 1)
-                j = ((yy - y0) * w + (x - x0)) * 3
-                sr += horiz[j]
-                sg += horiz[j + 1]
-                sb += horiz[j + 2]
-                cnt += 1
-            i = px(x, y)
-            buf[i] = sr // cnt
-            buf[i + 1] = sg // cnt
-            buf[i + 2] = sb // cnt
+    # --- wall: warm morning gradient, cream to soft peach
+    cv.vgrad_rect(0, 0, W, 560, (250, 232, 205), (244, 214, 176))
 
+    # --- soft window light: a pale glow upper left (a few mid-size dabs;
+    # large-radius dabs are far too slow in pure Python)
+    for r in (140, 110, 80, 55, 35):
+        cv.dab(300, 130, r, (255, 246, 220), 0.10)
 
-# ---------------------------------------------------------------- scene
-def paint_background():
-    # Warm morning gradient: pale cream at top to soft honey at the bottom.
-    top = (253, 240, 214)
-    mid = (250, 214, 160)
-    bot = (238, 178, 110)
-    for y in range(H):
-        t = y / (H - 1)
-        if t < 0.55:
-            col = lerp_col(top, mid, t / 0.55)
-        else:
-            col = lerp_col(mid, bot, (t - 0.55) / 0.45)
-        i = y * W * 3
-        for x in range(W):
-            buf[i] = int(col[0])
-            buf[i + 1] = int(col[1])
-            buf[i + 2] = int(col[2])
-            i += 3
-    # Soft golden glow behind the dish.
-    soft_disc(512, 470, 430, (255, 226, 160), 0.55)
-    soft_disc(512, 470, 260, (255, 240, 200), 0.5)
-
-
-def paint_table():
-    # Warm wooden table band across the lower third, with faint grain.
-    for y in range(770, H):
-        t = (y - 770) / (H - 770)
-        col = lerp_col((176, 118, 66), (140, 88, 46), t)
-        for x in range(W):
-            blend(x, y, col[0], col[1], col[2], 0.9)
+    # --- wooden table from y=560 down, warm planks
+    cv.vgrad_rect(0, 560, W, H, (176, 124, 78), (146, 98, 58))
+    for plank_y in (560, 668, 776, 884, 992):
+        cv.fill_rect(0, plank_y, W, plank_y + 3, (120, 78, 44))
+    # wood grain: gentle wavy darker streaks
     for _ in range(26):
-        y = RNG.randint(790, 1010)
-        x0 = RNG.randint(0, 500)
-        ln = RNG.randint(200, 1024)
-        for x in range(x0, min(W, x0 + ln)):
-            blend(x, y, 120, 74, 38, 0.10)
+        gy = RNG.randint(575, 1010)
+        gx = RNG.randint(-40, 900)
+        length = RNG.randint(120, 320)
+        amp = RNG.randint(2, 6)
+        col = (128, 84, 48) if RNG.random() < 0.5 else (198, 148, 96)
+        prev = None
+        for s in range(0, length, 8):
+            x = gx + s
+            y = gy + int(amp * math.sin(s / 46.0 + gy))
+            if prev is not None:
+                cv.line(prev[0], prev[1], x, y, col, width=2, alpha=0.35)
+            prev = (x, y)
+    # light pooling on the table in front of the plate (subtle)
+
+    # --- plate shadow on the table
+    cv.fill_ellipse(512, 700, 400, 108, (110, 70, 38))
+    for r in range(0, 0):  # (kept simple: solid soft shadow via dabs)
+        pass
+    cv.dab(512, 700, 330, (110, 70, 38), 0.18)
+
+    # --- cream plate
+    cv.fill_ellipse_grad(512, 660, 392, 128, (252, 244, 228), (232, 218, 196))
+    cv.fill_ellipse_grad(512, 652, 392, 122, (250, 242, 226), (238, 226, 206))
+    # plate rim
+    cv.ellipse_ring(512, 652, 352, 106, (206, 190, 164), 3)
+    cv.ellipse_ring(512, 652, 300, 88, (222, 208, 184), 2)
+    # plate highlight, upper left
+    cv.dab(360, 600, 130, (255, 252, 244), 0.35)
+
+    # --- pancake stack: four golden slabs, bottom to top
+    pancakes = [
+        # (cx, cy, rx, ry, top colour, side colour)
+        (512, 640, 268, 62, (226, 164, 74), (176, 112, 40)),
+        (512, 590, 252, 58, (232, 172, 82), (182, 118, 44)),
+        (512, 542, 232, 54, (238, 180, 90), (188, 124, 48)),
+        (512, 496, 208, 50, (244, 190, 100), (194, 130, 52)),
+    ]
+    for cx, cy, rx, ry, top, side in pancakes:
+        # side / lower edge: darker, slightly lower and wider
+        cv.fill_ellipse_grad(cx, cy + 10, rx, ry, side, (150, 92, 30))
+        # top surface
+        cv.fill_ellipse_grad(cx, cy - 4, rx, ry - 6, top, lerp(top, side, 0.45))
+        # golden-brown toasted speckles on the top
+        for _ in range(46):
+            ang = RNG.uniform(0, 2 * math.pi)
+            rr = math.sqrt(RNG.random())
+            sx = int(cx + math.cos(ang) * rr * (rx - 14))
+            sy = int(cy - 4 + math.sin(ang) * rr * (ry - 12))
+            rad = RNG.randint(2, 6)
+            col = (196, 128, 48) if RNG.random() < 0.6 else (248, 205, 120)
+            cv.dab(sx, sy, rad, col, RNG.uniform(0.25, 0.55))
+        # crisp edge highlight along the upper rim
+        cv.ellipse_ring(cx, cy - 4, rx - 2, ry - 8, (250, 205, 120), 2)
+
+    # --- honey pool on the top pancake
+    cv.fill_ellipse_grad(512, 470, 150, 30, (246, 178, 52), (214, 128, 22))
+    cv.fill_ellipse_grad(512, 466, 132, 24, (252, 190, 66), (226, 146, 30))
+    # glossy highlight on the honey pool
+    cv.dab(470, 458, 46, (255, 222, 130), 0.55)
+    cv.dab(540, 476, 26, (255, 214, 110), 0.4)
+
+    # --- honey drips running down the front of the stack
+    drips = [
+        (392, 500, 12, 150), (448, 505, 15, 205), (512, 505, 13, 120),
+        (580, 505, 16, 225), (636, 500, 11, 165),
+    ]
+    for dx, dy, dr, length in drips:
+        cv.fill_rect(dx - dr, dy, dx + dr, dy + length, (232, 152, 34))
+        cv.fill_ellipse(dx, dy + length, dr + 2, dr + 6, (222, 140, 28))
+        cv.line(dx - dr // 2, dy + 8, dx - dr // 2, dy + length - 10,
+                (255, 205, 100), width=3, alpha=0.6)
+    # honey puddle on the plate, front right
+    cv.fill_ellipse_grad(640, 690, 92, 22, (240, 170, 44), (210, 124, 20))
+    cv.dab(620, 684, 30, (255, 214, 110), 0.5)
+
+    # --- melting butter pat on top, tilted
+    butter = [(468, 440), (556, 432), (566, 470), (478, 478)]
+    cv.fill_poly(butter, (252, 214, 92))
+    cv.fill_poly([(478, 448), (548, 442), (554, 462), (486, 468)],
+                 (255, 230, 130))
+    # butter gloss + a melting drip down its side
+    cv.dab(500, 446, 22, (255, 244, 170), 0.6)
+    cv.fill_ellipse(560, 482, 10, 16, (250, 208, 84))
+    cv.dab(560, 490, 9, (255, 230, 130), 0.5)
+
+    # --- blueberries: plump, dark, with bloom and a bright specular dot
+    def blueberry(cx, cy, r):
+        cv.fill_ellipse_grad(cx, cy, r, r, (72, 78, 150), (34, 36, 84))
+        cv.dab(cx - int(r * 0.35), cy - int(r * 0.35), int(r * 0.55),
+               (110, 120, 190), 0.55)
+        cv.dab(cx - int(r * 0.3), cy - int(r * 0.3), int(r * 0.18),
+               (225, 230, 255), 0.9)
+        # star scar on top
+        cv.dab(cx + int(r * 0.25), cy - int(r * 0.45), int(r * 0.22),
+               (52, 54, 110), 0.8)
+
+    berries = [
+        (352, 622, 34), (300, 648, 28), (392, 664, 30),
+        (668, 636, 32), (716, 664, 26), (622, 668, 24),
+        (596, 478, 22), (428, 470, 20),
+    ]
+    for bx, by, br in berries:
+        # soft contact shadow under each berry
+        cv.fill_ellipse(bx, by + br - 2, br + 4, int(br * 0.35), (120, 84, 40))
+        blueberry(bx, by, br)
+
+    # --- mint leaves: fresh green, veined, beside the berries
+    def mint_leaf(cx, cy, length, angle_deg, tilt=0):
+        a = math.radians(angle_deg)
+        dx, dy = math.cos(a), math.sin(a)
+        px, py = -dy, dx  # perpendicular
+        tip = (cx + dx * length, cy + dy * length)
+        base = (cx - dx * length * 0.25, cy - dy * length * 0.25)
+        wdt = length * 0.34
+        left = (cx + px * wdt, cy + py * wdt)
+        right = (cx - px * wdt, cy - py * wdt)
+        cv.fill_poly([base, left, tip, right], (58, 138, 74))
+        cv.fill_poly([(base[0] + dx * 6, base[1] + dy * 6),
+                      (cx + px * wdt * 0.45, cy + py * wdt * 0.45),
+                      tip,
+                      (cx - px * wdt * 0.45, cy - py * wdt * 0.45)],
+                     (86, 176, 96))
+        cv.line(base[0], base[1], tip[0], tip[1], (34, 96, 52),
+                width=2, alpha=0.7)
+
+    mint_leaf(330, 700, 52, -160)
+    mint_leaf(700, 700, 48, -20)
+    mint_leaf(600, 452, 40, -55)
+    mint_leaf(438, 452, 36, -125)
+
+    # --- steam: soft translucent ribbons rising above the stack
+    for sx, phase, amp, height in ((470, 0.0, 16, 150),
+                                   (512, 1.4, 20, 185),
+                                   (556, 2.6, 15, 150)):
+        for step in range(0, height, 6):
+            t = step / height
+            x = int(sx + amp * math.sin(phase + t * 5.0) * (0.4 + t))
+            y = 430 - step
+            rad = int(10 + t * 26)
+            cv.dab(x, y, rad, (255, 250, 240), 0.10 * (1.0 - t * 0.55))
+
+    # --- warm light wash over the whole scene, upper left
+    for r in (170, 130, 90, 55):
+        cv.dab(280, 120, r, (255, 240, 200), 0.05)
+
+    return cv
 
 
-def paint_plate():
-    # Soft shadow under the plate, then the plate itself.
-    soft_disc(512, 782, 430, (120, 70, 30), 0.28)
-    ellipse(512, 716, 420, 136, (255, 251, 242), (232, 214, 190), 1.0,
-            edge_dark=(196, 172, 140))
-    # Inner rim ring.
-    ellipse(512, 712, 352, 110, (250, 242, 226), (238, 222, 196), 1.0)
-    ellipse(512, 712, 344, 106, (255, 253, 246), (244, 230, 206), 1.0)
-    # Gloss highlight on the rim, upper left.
-    ellipse(300, 660, 160, 28, (255, 255, 255), (255, 255, 255), 0.35)
+# ---------------------------------------------------------------- PNG out
 
-
-def paint_pancake(cx, cy, rx, ry):
-    # Golden-brown body with a toasted rim and a lighter, fluffy top.
-    ellipse(cx, cy, rx, ry, (233, 178, 92), (176, 110, 44), 1.0,
-            edge_dark=(146, 88, 30))
-    ellipse(cx, cy - ry * 0.28, rx * 0.88, ry * 0.62,
-            (246, 205, 128), (228, 168, 88), 0.9)
-    # Toasted speckles and a few darker golden bubbles.
-    speckle(cx, cy - ry * 0.2, rx * 0.85, ry * 0.55, 260,
-            [(190, 122, 48), (168, 100, 34), (214, 150, 70)], 1, 3, 0.5)
-    speckle(cx, cy - ry * 0.2, rx * 0.7, ry * 0.45, 60,
-            [(222, 164, 84), (240, 196, 120)], 2, 5, 0.55)
-    # Bottom edge shadow so the stack reads as separate layers.
-    ellipse(cx, cy + ry * 0.55, rx * 0.96, ry * 0.42,
-            (120, 70, 24), (120, 70, 24), 0.35)
-
-
-def paint_syrup_drip(x, top_y, length, width):
-    """A glossy honey drip running down the front of the stack."""
-    pts = []
-    steps = 10
-    for s in range(steps + 1):
-        t = s / steps
-        y = top_y + t * length
-        wob = math.sin(t * 9.0) * 2.5
-        pts.append((x - width / 2 + wob, y))
-    for s in range(steps, -1, -1):
-        t = s / steps
-        y = top_y + t * length
-        wob = math.sin(t * 9.0) * 2.5
-        pts.append((x + width / 2 + wob, y))
-    wobbly_blob(pts, (196, 118, 16), 0.95)
-    # Rounded bulb at the bottom of the drip.
-    circle(x, top_y + length, width * 0.62, (196, 118, 16), 0.95)
-    # Gloss streak down the drip.
-    for s in range(steps + 1):
-        t = s / steps
-        y = int(top_y + t * length)
-        blend(int(x - width * 0.18), y, 255, 214, 120, 0.55)
-
-
-def paint_syrup_pool(cx, cy, rx, ry):
-    # Amber syrup pooled on the top pancake, glossy with highlights.
-    ellipse(cx, cy, rx, ry, (232, 158, 32), (190, 110, 14), 0.96,
-            edge_dark=(160, 92, 10))
-    ellipse(cx - rx * 0.25, cy - ry * 0.3, rx * 0.45, ry * 0.4,
-            (255, 205, 90), (255, 205, 90), 0.5)
-    ellipse(cx + rx * 0.35, cy + ry * 0.25, rx * 0.3, ry * 0.3,
-            (255, 190, 70), (255, 190, 70), 0.35)
-
-
-def paint_butter(cx, cy):
-    # A pat of butter, melting: soft yellow square with rounded corners.
-    w, h = 92, 46
-    pts = [(cx - w / 2 + 12, cy - h / 2), (cx + w / 2 - 12, cy - h / 2),
-           (cx + w / 2, cy - h / 2 + 12), (cx + w / 2, cy + h / 2 - 12),
-           (cx + w / 2 - 12, cy + h / 2), (cx - w / 2 + 12, cy + h / 2),
-           (cx - w / 2, cy + h / 2 - 12), (cx - w / 2, cy - h / 2 + 12)]
-    wobbly_blob(pts, (255, 226, 130), 1.0)
-    wobbly_blob([(cx - w / 2 + 18, cy - h / 2 + 6),
-                 (cx + w / 2 - 18, cy - h / 2 + 6),
-                 (cx + w / 2 - 6, cy - h / 2 + 16),
-                 (cx - w / 2 + 6, cy - h / 2 + 16)],
-                (255, 244, 190), 0.9)
-    # Melted butter pooling at its base.
-    ellipse(cx + 6, cy + h / 2 + 4, 58, 10, (255, 222, 120), (250, 200, 90),
-            0.95)
-
-
-def paint_blueberry(cx, cy, r):
-    # Plump blueberry: deep indigo body, dusty bloom, bright highlight,
-    # little star crown on top.
-    ellipse(cx, cy, r, r * 0.92, (74, 74, 150), (38, 38, 96), 1.0,
-            edge_dark=(24, 24, 66))
-    ellipse(cx - r * 0.3, cy - r * 0.35, r * 0.55, r * 0.45,
-            (120, 122, 190), (120, 122, 190), 0.45)
-    circle(cx - r * 0.38, cy - r * 0.42, r * 0.22, (235, 238, 255), 0.9)
-    # Star crown.
-    for k in range(5):
-        ang = -math.pi / 2 + k * 2 * math.pi / 5
-        x1 = cx + math.cos(ang) * r * 0.28
-        y1 = cy - r * 0.92 + math.sin(ang) * r * 0.28
-        x2 = cx + math.cos(ang + 0.5) * r * 0.12
-        y2 = cy - r * 0.92 + math.sin(ang + 0.5) * r * 0.12
-        blend(int(x1), int(y1), 30, 30, 70, 0.8)
-        blend(int(x2), int(y2), 30, 30, 70, 0.8)
-    circle(cx, cy - r * 0.92, r * 0.16, (28, 28, 64), 0.9)
-
-
-def paint_mint_leaf(cx, cy, size, angle_deg):
-    a = math.radians(angle_deg)
-    dx, dy = math.cos(a), math.sin(a)
-    px_, py_ = -dy, dx
-    pts = []
-    for s in range(13):
-        t = s / 12
-        along = (t - 0.5) * size
-        width = math.sin(t * math.pi) * size * 0.32
-        pts.append((cx + dx * along - px_ * width,
-                    cy + dy * along - py_ * width))
-    for s in range(12, -1, -1):
-        t = s / 12
-        along = (t - 0.5) * size
-        width = math.sin(t * math.pi) * size * 0.32
-        pts.append((cx + dx * along + px_ * width,
-                    cy + dy * along + py_ * width))
-    wobbly_blob(pts, (74, 148, 74), 1.0)
-    # Centre vein.
-    for s in range(9):
-        t = s / 8
-        blend(int(cx + dx * (t - 0.5) * size * 0.9),
-              int(cy + dy * (t - 0.5) * size * 0.9),
-              190, 230, 170, 0.7)
-
-
-def paint_honey_on_plate():
-    # A smooth honey swirl on the plate, right of the stack.
-    for i in range(260):
-        t = i / 259
-        x = 690 + t * 170
-        y = 800 + math.sin(t * math.pi) * 26 - t * 10
-        circle(int(x), int(y), 5, (214, 138, 24), 0.85)
-        circle(int(x), int(y), 2, (255, 200, 90), 0.6)
-
-
-def paint_steam():
-    # Three rising wisps of steam above the hot stack, then softened.
-    for cx0, amp, ph in ((452, 26, 0.0), (512, 34, 1.3), (572, 26, 2.6)):
-        for y in range(170, 365):
-            t = (365 - y) / 195
-            wob = math.sin(y * 0.045 + ph) * amp * t
-            cx = cx0 + wob
-            half = 26 * (0.5 + t * 0.7)
-            for x in range(int(cx - half), int(cx + half) + 1):
-                d = abs(x - cx) / half
-                a = 0.22 * (1 - d) * (0.4 + 0.6 * t)
-                blend(x, y, 255, 250, 240, a)
-    box_blur_region(380, 150, 650, 375, 6)
-
-
-def paint_vignette():
-    for y in range(H):
-        for x in range(W):
-            d = math.hypot((x - 512) / 512, (y - 512) / 512)
-            if d > 0.95:
-                blend(x, y, 90, 50, 20, min(0.22, (d - 0.95) * 0.8))
-
-
-# ---------------------------------------------------------------- PNG encode
-def write_png(path, width, height, data):
-    def chunk(typ, payload):
-        c = struct.pack(">I", len(payload)) + typ + payload
-        c += struct.pack(">I", zlib.crc32(typ + payload) & 0xFFFFFFFF)
-        return c
-
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+def write_png(cv, path):
     raw = bytearray()
-    stride = width * 3
-    for y in range(height):
-        raw.append(0)  # filter: None
-        raw += data[y * stride:(y + 1) * stride]
-    png = b"\x89PNG\r\n\x1a\n"
-    png += chunk(b"IHDR", ihdr)
-    png += chunk(b"IDAT", zlib.compress(bytes(raw), 9))
-    png += chunk(b"IEND", b"")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    prev = bytearray(W * 3)
+    for y in range(H):
+        row = cv.rows[y]
+        raw.append(2)  # filter: Up
+        for i in range(W * 3):
+            raw.append((row[i] - prev[i]) & 0xFF)
+        prev = row
+    comp = zlib.compress(bytes(raw), 9)
+    ihdr = struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)
+    png = bytearray()
+    png += b"\x89PNG\r\n\x1a\n"
+    for tag, data in ((b"IHDR", ihdr), (b"IDAT", comp), (b"IEND", b"")):
+        png += struct.pack(">I", len(data)) + tag + data
+        png += struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
     with open(path, "wb") as f:
         f.write(png)
     return len(png)
 
 
 def main():
-    paint_background()
-    paint_table()
-    paint_plate()
-    # Pancake stack, bottom to top.
-    paint_pancake(512, 622, 288, 62)
-    paint_pancake(512, 554, 276, 60)
-    paint_pancake(512, 490, 262, 58)
-    paint_pancake(512, 428, 244, 56)
-    # Honey syrup: pool on top, drips down the front of the stack.
-    paint_syrup_pool(512, 398, 205, 36)
-    paint_syrup_drip(428, 428, 170, 28)
-    paint_syrup_drip(606, 426, 210, 26)
-    paint_syrup_drip(512, 432, 120, 32)
-    # Melting butter on top, blueberries, mint.
-    paint_butter(512, 368)
-    paint_blueberry(386, 404, 32)
-    paint_blueberry(648, 398, 29)
-    paint_blueberry(600, 376, 24)
-    paint_mint_leaf(656, 430, 78, -28)
-    # Berries and honey resting on the plate.
-    paint_blueberry(292, 716, 28)
-    paint_blueberry(348, 738, 24)
-    paint_mint_leaf(768, 668, 68, 18)
-    paint_honey_on_plate()
-    # Steam, then a gentle vignette.
-    paint_steam()
-    paint_vignette()
-    n = write_png(OUT, W, H, buf)
-    print(f"wrote {OUT} ({W}x{H}, {n} bytes)")
+    os.makedirs(OUT_DIR, exist_ok=True)  # create only; never remove /output
+    cv = paint()
+    size = write_png(cv, os.path.join(OUT_DIR, "entry.png"))
+    print(f"Wrote {os.path.join(OUT_DIR, 'entry.png')} ({W}x{H}, {size} bytes)")
 
 
 if __name__ == "__main__":
